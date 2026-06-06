@@ -55,30 +55,37 @@ one label for a whole construct. Canonical example — adding a safety net:
 - *What the guard does* → **OK** if there is one obvious behavior; **BLOCK** the moment it
   changes failure semantics (swallow vs throw vs retry vs default).
 
-### Worked examples (from the reference projects)
+### Worked examples (axis illustrations)
 
-- **O(n²) sweep, occupancy generator.** `for point in obstacles` runs *per frame over a
-  point cloud* (potentially millions of points). An O(n²) sweep here is viability-
-  threatening (axis 3) → **BLOCK**: ask for expected scale / acceptable complexity bound.
-  The identical loop over an obviously-tiny list → **ASSUME + surface** ("this is O(n²)").
+- **O(n²) sweep.** A per-window loop over a high-volume stream is viability-threatening
+  (axis 3) → **BLOCK**: ask for expected scale / acceptable complexity bound. The identical
+  loop over an obviously-tiny collection → **ASSUME + surface** ("this is O(n²)").
 - **Workaround compromising a stated goal.** A workaround that silently fails to deliver
   what the user asked → **BLOCK** (axis 1/2). A behavior-preserving compat shim → **ASSUME
   + surface**.
-- **Double-buffer selection, voxel engine.** `GetSlot`/`SetSlot` "operates on actual
-  sector data or snapshotted sector data" — if the selection logic between the two buffers
-  is underdetermined, choosing wrong is a correctness bug → **BLOCK**.
+- **Underdetermined selection.** When a procedure could operate on one of two states (e.g.
+  a live vs. snapshotted buffer) and the selection logic is unspecified, choosing wrong is
+  a correctness bug → **BLOCK**.
 
-### Standing policies (config-driven promotion)
+See §7 for full, self-contained worked examples.
 
-Many BLOCKs/ASSUMEs are the *same question repeated* ("what is the error policy?", "what
-scale should I assume?", "do you want defensive guards?"). The project config
-(`.vbc/project.md`) may declare **standing assumption policies** — e.g. *"errors: throw,
-never swallow"*, *"assume datasets are large unless told otherwise"*, *"add null guards on
-public methods"*, *"maintain backward compatibility"*.
+### Project-wide assumptions (config-driven promotion)
 
-A standing policy **promotes** a recurring **BLOCK → OK/ASSUME** because the critical
-question is pre-answered globally. The IR records *which policy* resolved each such call,
-so the audit trail still shows the decision was made under a policy rather than being free.
+The project config (`.vbc/project.md`) carries an **Assumptions** section with two
+user-authored kinds, plus one compiler-maintained kind:
+
+- **Premises** — facts declared true that the compiler may *rely on* (e.g. "all timestamps
+  are UTC"; "single-threaded unless a construct uses locks"). A premise can remove a
+  divergence/uncertainty entirely → promotes a would-be **BLOCK → OK**.
+- **Policies** — how to *resolve* recurring decisions (e.g. "errors: throw, never swallow";
+  "unset numeric config: BLOCK, do not default"; "add null guards on public methods"). A
+  policy promotes a recurring **BLOCK → ASSUME**.
+- **Ratified assumptions** — a compiler-*appended* subsection: when the same ASSUME recurs,
+  the compiler proposes it here (dated, with source `.vibe`) for the user to ratify. The
+  compiler **never** edits user-authored Premises/Policies — it only appends proposals.
+
+In every case the IR records *which* premise/policy/ratified assumption resolved a call, so
+the audit trail shows the decision was made under a declared assumption rather than freely.
 
 ## 3. Border applies in two contexts
 
@@ -119,7 +126,8 @@ policy to `.vbc/project.md`, then re-running the command.
 
 - `vbc/` — pseudo sources (`*.vibe`).
 - `.vbc/project.md` — `CLAUDE.md`-style project config. Declares target language(s),
-  source layout, conventions, build/test commands, and **standing assumption policies**.
+  source layout, conventions, build/test commands, and an **Assumptions** section
+  (Premises, Policies, and a compiler-appended Ratified-assumptions subsection — see §2).
   This is what makes the compiler language-neutral.
 - `.vbc/ir/` — **persistent, committed, language-neutral** annotated IR. For each pseudo
   element it records:
@@ -141,7 +149,107 @@ policy to `.vbc/project.md`, then re-running the command.
   re-checks them, and **notifies the user when the gap is significant**.
 - The target project is assumed to be under git source control.
 
-## 7. Cross-platform packaging
+## 7. Worked examples (canonical — ship in the skill)
+
+These are self-contained, invented examples (no real/owned project code). They match two
+grammar "flavors": a systems/struct flavor and a pipeline/dataflow flavor.
+
+### 7.1 Compile context — systems/struct flavor (LRU cache)
+
+```csharp
+// vbc/cache.vibe
+struct LruCache<K, V>
+{
+    Dictionary<K, Node> map;
+    Node head, tail;             // intrusive list, MRU at head
+    List<(K, V)> _dirty;         // write-back buffer
+    bool _writeBackEnabled;
+    long hits, misses;
+    long _evictLock;
+}
+
+partial struct LruCache<K, V>
+{
+    const int CAPACITY = ...;            // not specified
+
+    V Get(K key)
+    {
+        node = map.Find(key);
+        if (node == null) { misses++; return /* miss? */; }
+        MoveToFront(node);               // LRU bookkeeping
+        hits++; return node.value;
+    }
+
+    void Put(K key, V value)
+    {
+        if (map.Count >= CAPACITY)
+            lock (_evictLock) Evict();   // drop least-recently-used
+        InsertAtFront(key, value);
+        if (_writeBackEnabled) MarkDirty(key, value);
+    }
+}
+```
+
+| Construct | Label | Why (axis) |
+|---|---|---|
+| `MoveToFront`, `InsertAtFront`, `Evict`, `map.Find` | **OK** | LRU fully implied by name |
+| `return /* miss? */` on miss | **BLOCK** | axis 1 — throw vs `default(V)` vs Option is observably different error semantics |
+| `CAPACITY = ...` | **BLOCK** → ASSUME if a policy/premise supplies it | governs memory + eviction; divergent + costly |
+| `_evictLock` present, `Get` unsynchronized | **BLOCK** → OK if a "single-threaded" premise is declared | axis 2 — concurrency contract |
+| `_dirty` flush timing unstated | **ASSUME + surface** | defensible default, cheap to change, surfaced |
+
+### 7.2 Compile context — pipeline/dataflow flavor (trending terms)
+
+```python
+# vbc/trending.vibe
+# Find terms surging above their historical baseline rate.
+
+def find_trending(events: Stream, window):
+    counts = {}
+    for e in window_of(events, window):
+        counts[normalize(e.term)] += 1        # normalize: case-fold; stem?
+    baseline = load_baseline_rates()
+    out = []
+    for term, c in counts:
+        expected = baseline.get(term)         # term never seen before?
+        if surprise(c, expected) > threshold: # surprise = ???
+            out.append(term)
+    return top_k(out, k)                       # k = ???
+
+for window in tumbling_windows(events, every="1min"):
+    find_trending(window, ...)
+```
+
+| Construct | Label | Why (axis) |
+|---|---|---|
+| `top_k`, `tumbling_windows` | **OK** | well-known |
+| `normalize` | **ASSUME** | case-fold obvious; stemming surfaced as a sub-choice |
+| `surprise(c, expected)` | **BLOCK** | axis 1 — ratio vs z-score vs KL give materially different results |
+| `baseline.get(term)` for unseen term | **BLOCK** | missing value → div-by-zero / error semantics |
+| `threshold`, `k` | **BLOCK** → ASSUME via policy/premise | unset critical config |
+| per-window loop | **ASSUME** → BLOCK if stream declared huge | axis 3 — perf/scale |
+
+### 7.3 Validate context — pseudo contradicts existing code
+
+The keystone phase. Validate is read-only and asks "does this pseudo faithfully describe
+what the code *currently is*?" — not "what should it become."
+
+```
+# vbc/cache.vibe says:        Evict();   // drop least-recently-used   (tail)
+# but existing Cache.cs has:  void Evict() => Remove(head);            // head = MRU
+
+# /vbc-validate cache.vibe  →  BLOCK
+#   LruCache.Evict — pseudo intent: drop LRU (tail).
+#   Reality: drops head (MRU). Pseudo cannot be linked to current code.
+#   Resolve by either:
+#     (a) the pseudo is meant to DESCRIBE reality → fix the pseudo to match, or
+#     (b) the divergence is an INTENDED change → acknowledge it and use /vbc-compile.
+```
+
+Validate cannot tell a mistaken description from an intended change, so it hard-halts and
+makes the user choose. This is what makes later edits meaningful.
+
+## 8. Cross-platform packaging
 
 - **Skill** `vibe-compiler` — holds all methodology (the border axes, the workflow, the IR
   format, surgical-patch rules). Written tool-agnostic. Installed to `~/.claude/skills` and
@@ -163,24 +271,24 @@ policy to `.vbc/project.md`, then re-running the command.
     install.sh                           # fan-out installer
   ```
 
-## 8. Build order
+## 9. Build order
 
 Implement **validate-first** (the keystone — verified correspondence and the border
 discipline), then **compile** (surgical patching), then **ingest** (the optional helper).
 
-## 9. Out of scope for v1 (YAGNI)
+## 10. Out of scope for v1 (YAGNI)
 
 - Character-span linkage (symbol-level only).
 - Projects not under git.
 - Automatic code → pseudo back-sync (code edits silently updating pseudo).
 
-## 10. Decisions settled with defaults (changeable)
+## 11. Decisions settled with defaults (changeable)
 
 - **Command names:** `/vbc-validate`, `/vbc-compile`, `/vbc-ingest`.
 - **IR format:** structured Markdown (human-readable, doubles as the audit trail) rather
   than JSON.
 
-## 11. Open questions for the implementation plan
+## 12. Open questions for the implementation plan
 
 - Exact structured-Markdown schema for IR entries.
 - `.vbc/project.md` template (sections, policy syntax).
