@@ -101,13 +101,13 @@ The same OK/ASSUME/BLOCK labeling is used in two distinct operations:
 1. **Understand.** The user reads an existing codebase and writes `*.vibe` pseudo capturing
    their mental model. (Optionally drafted via `ingest`.)
 
-2. **Validate** (`/vbc-validate <file.vibe>`). Read-only. The compiler links the pseudo to
+2. **Validate** (`/vbc-validate <file.vibe | dir>`). Read-only. The compiler links the pseudo to
    the actual implementation **without modifying anything**, builds/updates the annotated
    IR recording that linkage, classifies the border, and **hard-halts on any BLOCK**. It
    records the git commit each linkage was verified against. This establishes a verified
    correspondence between abstraction and reality *before* any change is made.
 
-3. **Compile** (`/vbc-compile <file.vibe>`). The user has edited the *validated* pseudo to
+3. **Compile** (`/vbc-compile <file.vibe | dir>`). The user has edited the *validated* pseudo to
    express desired **changes**. Compile lowers the IR into the target language via
    **surgical, symbol-level patches**, applying changes to the real implementation while
    leaving code not covered by pseudo untouched. Hard-halts on any BLOCK.
@@ -131,23 +131,42 @@ policy to `.vbc/project.md`, then re-running the command.
   This is what makes the compiler language-neutral.
 - `.vbc/ir/` — **persistent, committed, language-neutral** annotated IR. For each pseudo
   element it records:
-  - **linkage**: pseudo element → `(file, symbol-path)` (e.g. `Sector.SetSlot`);
+  - **linkage**: pseudo element → `(file, symbol-path)` (e.g. `LruCache.Evict`);
   - **border labels** (OK/ASSUME/BLOCK) with assumption notes and, where applicable, the
-    standing policy that resolved a call;
-  - the **git commit** the linkage was validated against.
+    premise/policy/ratified assumption that resolved a call;
+  - the **git commit** the linkage was validated against, and the **content hash** of the
+    source `.vibe` at last processing (the incremental-build cache — see §6).
 - `.vbc/reports/` — the border report from the last run: ASSUMEs to review and BLOCKs to
   resolve.
 
-## 6. Linkage & git-based drift tracking
+## 6. Change tracking, drift & incremental compile
 
-- Linkage is **symbol-level**: pseudo element → `(file, symbol-path)`. Symbols survive
-  reformatting and edits elsewhere, making linkage robust to drift (chosen over fragile
-  character-span linkage).
-- The IR stores the git commit each linkage was validated against.
-- On validate/compile, the compiler uses **read-only git** (`git log` / `diff` / `blame`)
-  on the linked files/symbols to detect drift since the last validation, flags stale links,
-  re-checks them, and **notifies the user when the gap is significant**.
-- The target project is assumed to be under git source control.
+The target project is assumed to be under git, and `vbc/` lives **inside that one repo** —
+there is no separate/nested repo for the pseudo. Two complementary signals decide what is
+stale, both derived from the single repo:
+
+**Pseudo side — content hash.** The IR stores a content hash per `.vibe` file (via
+`git hash-object`, which hashes the *working-tree* content, so uncommitted edits are
+caught). On each run the compiler recomputes hashes; a changed hash marks that `.vibe`
+stale. Full pseudo *history* comes free from `git log`/`git blame` on `vbc/`.
+
+**Code side — symbol drift.** Linkage is **symbol-level**: pseudo element →
+`(file, symbol-path)`. Symbols survive reformatting and edits elsewhere, making linkage
+robust (chosen over fragile character-span linkage). The IR stores the git commit each
+linkage was validated against; on each run the compiler uses **read-only git**
+(`git log`/`diff`/`blame`) on the linked symbols to detect drift, flags stale links,
+re-checks them, and **notifies the user when the gap is significant**.
+
+**Incremental compile against a directory.** `/vbc-validate` and `/vbc-compile` accept a
+single `.vibe` file *or* a directory (e.g. `vbc/`). For a directory, the compiler walks the
+tree and reprocesses only what is stale by either signal — like an incremental `make`, with
+the IR manifest (hashes + validated-at commits) as the build cache. Because `.vibe` files
+can reference each other, v1 is conservative: it reprocesses a changed file **and its
+dependents**, falling back to the whole `vbc/` unit when the dependency graph is unclear.
+Precise dependency-graph tracking is a later refinement.
+
+"Monitoring" pseudo changes is therefore **on-demand at command time**, not a background
+watcher — which fits a slash-command tool that runs inside an agent session.
 
 ## 7. Worked examples (canonical — ship in the skill)
 
