@@ -1,7 +1,12 @@
 # Vibe Compiler (vbc) — Design
 
 **Date:** 2026-06-06
-**Status:** Approved design, pending implementation plan
+**Status:** Approved design, revised after adversarial review (2026-06-06); pending implementation plan
+
+> Revision note: §2–§7 updated per the adversarial review in
+> `../reviews/2026-06-06-adversarial-spec-review.md` — atomic/transactional compile,
+> symbol-path grammar, NEW/greenfield path, compile precondition + per-element status,
+> premise-promotion safety, rename re-link, and git preconditions.
 
 ## 1. Concept
 
@@ -87,12 +92,26 @@ user-authored kinds, plus one compiler-maintained kind:
 In every case the IR records *which* premise/policy/ratified assumption resolved a call, so
 the audit trail shows the decision was made under a declared assumption rather than freely.
 
+**Promotion safety.** Because **OK is silent** (only ASSUME is surfaced), an unchecked
+premise could quietly green-light wrong code. Therefore:
+
+- A premise that promotes **BLOCK → OK** must still emit a **one-line surfaced note**
+  ("resolved OK under premise *X*") in the run report, so the promotion is auditable at
+  code-review time — not only inside the IR.
+- Each premise/policy declares an explicit **scope** (which files / symbols / construct
+  kinds it governs) so matching a premise to a call is deterministic, not freeform judgment.
+- Validate runs a **staleness re-check**: if it observes code that contradicts a premise
+  (e.g. locks/threads appear under a "single-threaded" premise), it flags the premise as
+  **possibly-stale** and re-raises the underlying BLOCK instead of relying on it.
+
 ## 3. Border applies in two contexts
 
 The same OK/ASSUME/BLOCK labeling is used in two distinct operations:
 
-- **Validate** — "Can this pseudo faithfully describe the existing code?" A BLOCK here means
-  the pseudo claims something that cannot be reconciled with reality.
+- **Validate** — "Can this pseudo faithfully describe the existing code — or, for net-new
+  elements, be soundly created?" A BLOCK here means the pseudo *contradicts* existing
+  reality (a `DIVERGED` element); a symbol simply absent from the codebase is `NEW`, not a
+  BLOCK (§4).
 - **Compile** — "Can I generate this logic safely?" A BLOCK here means a critical assumption
   is required to produce the code.
 
@@ -101,26 +120,63 @@ The same OK/ASSUME/BLOCK labeling is used in two distinct operations:
 1. **Understand.** The user reads an existing codebase and writes `*.vibe` pseudo capturing
    their mental model. (Optionally drafted via `ingest`.)
 
-2. **Validate** (`/vbc-validate <file.vibe | dir>`). Read-only. The compiler links the pseudo to
-   the actual implementation **without modifying anything**, builds/updates the annotated
-   IR recording that linkage, classifies the border, and **hard-halts on any BLOCK**. It
-   records the git commit each linkage was verified against. This establishes a verified
-   correspondence between abstraction and reality *before* any change is made.
+2. **Validate** (`/vbc-validate <file.vibe | dir>`). Read-only. The compiler links each
+   pseudo element to the actual implementation **without modifying anything**,
+   builds/updates the annotated IR, classifies the border, and records per-element
+   **status** (§5) plus the git commit each linkage was verified against. Three outcomes
+   per element:
+   - symbol **exists and matches** → `LINKED` (a verified correspondence);
+   - symbol **absent from the entire codebase** → `NEW` (to-be-created — *not* a BLOCK;
+     this is the greenfield / new-feature case);
+   - symbol **exists but the pseudo contradicts it** → `DIVERGED`, a **BLOCK** (the §7.3
+     case).
 
-3. **Compile** (`/vbc-compile <file.vibe | dir>`). The user has edited the *validated* pseudo to
-   express desired **changes**. Compile lowers the IR into the target language via
-   **surgical, symbol-level patches**, applying changes to the real implementation while
-   leaving code not covered by pseudo untouched. Hard-halts on any BLOCK.
+   Validate **hard-halts on any BLOCK** (a `DIVERGED` element, or a generation-axis BLOCK),
+   establishing a verified correspondence between abstraction and reality before any change.
+
+3. **Compile** (`/vbc-compile <file.vibe | dir>`). Lowers the IR into the target language:
+   **generates** net-new code for `NEW` elements (at paths derived from the `project.md`
+   layout; any invented path/namespace choice is recorded as ASSUME) and applies
+   **surgical, symbol-level patches** for `LINKED` / `CHANGE_ACK` elements, leaving code not
+   covered by pseudo untouched.
+
+   **Precondition (checkable).** For every element it would touch, compile requires an IR
+   entry whose status is `NEW`, `LINKED`, or `CHANGE_ACK`, and — for `LINKED` — whose
+   validated-at commit is an ancestor of HEAD with no unresolved drift (§6). If any required
+   entry is missing, `UNVALIDATED`, `DIVERGED`, `RELINK_PENDING`, or stale, compile **stops
+   and tells the user to validate first**. This turns "I ran compile before validate" and "a
+   validate that hard-halted left a partial IR" into deterministic refusals, not silent
+   mis-patches.
+
+   **Atomic application (transaction).** Compile **stages** all generated/patched code and
+   computes the whole result *before writing anything*. It writes to disk **only if the
+   entire processed set is BLOCK-free**; if any BLOCK arises, it writes **nothing** and the
+   implementation (and IR) remain exactly at the last successful state — like a compiler
+   that emits no binary on error. Incremental recomputation (§6) only decides *what is
+   re-derived*; it never makes the write partial.
+
+   **Auto-write.** A BLOCK-free compile writes (and may commit) without a separate
+   confirmation gate — the border discipline is the guard, and the user reviews via
+   `git diff` and rolls back via git. This relies on the git preconditions in §6.
 
 Plus **Ingest** (`/vbc-ingest`, optional helper). Drafts pseudo *from* existing code to
 lower the blank-page cost on a large unfamiliar codebase. The user then edits/trims the
 draft. Not part of the always-used spine; validate + compile are the spine.
 
-### Hard-halt semantics
+### Resolving a BLOCK
 
-If **any** BLOCK exists, no code is produced anywhere until every BLOCK is resolved. The
-user resolves a BLOCK by editing the pseudo, answering the question, or adding a standing
-policy to `.vbc/project.md`, then re-running the command.
+A run with any BLOCK produces **no code at all** (atomic — see phase 3); the prior state
+stays intact. The user resolves a BLOCK by one of:
+
+- **editing the pseudo** to remove the ambiguity, or **answering** the question;
+- adding a **premise/policy** to `.vbc/project.md` (promotes the BLOCK per §2);
+- for a `DIVERGED` element that is an **intended change** (§7.3 case b): **acknowledging**
+  it, which sets the element's status to `CHANGE_ACK`. The next compile is then authorized
+  to apply the change and re-link to the new behavior (status returns to `LINKED` at the new
+  commit). Without this acknowledgment, re-running compile would re-trigger the same
+  divergence BLOCK forever — the acknowledgment is what breaks that deadlock.
+
+Then the user re-runs the command.
 
 ## 5. Artifacts (inside the target project)
 
@@ -131,7 +187,12 @@ policy to `.vbc/project.md`, then re-running the command.
   This is what makes the compiler language-neutral.
 - `.vbc/ir/` — **persistent, committed, language-neutral** annotated IR. For each pseudo
   element it records:
-  - **linkage**: pseudo element → `(file, symbol-path)` (e.g. `LruCache.Evict`);
+  - **linkage**: pseudo element → one or more `(file, symbol-path)` targets (e.g.
+    `LruCache.Evict`), where `symbol-path` is the canonical identity key defined in §6;
+  - **status**: one of `NEW` (to-be-created), `LINKED` (validated against existing code),
+    `DIVERGED` (validate BLOCK — pseudo contradicts code), `CHANGE_ACK` (user-acknowledged
+    intended change; compile may apply), `RELINK_PENDING` (linked symbol gone after a
+    rename/delete, awaiting confirmation), or `UNVALIDATED`;
   - **border labels** (OK/ASSUME/BLOCK) with assumption notes and, where applicable, the
     premise/policy/ratified assumption that resolved a call;
   - the **git commit** the linkage was validated against, and the **content hash** of the
@@ -151,11 +212,41 @@ caught). On each run the compiler recomputes hashes; a changed hash marks that `
 stale. Full pseudo *history* comes free from `git log`/`git blame` on `vbc/`.
 
 **Code side — symbol drift.** Linkage is **symbol-level**: pseudo element →
-`(file, symbol-path)`. Symbols survive reformatting and edits elsewhere, making linkage
+`(file, symbol-path)`. Symbols survive reformatting and edits *elsewhere*, making linkage
 robust (chosen over fragile character-span linkage). The IR stores the git commit each
 linkage was validated against; on each run the compiler uses **read-only git**
 (`git log`/`diff`/`blame`) on the linked symbols to detect drift, flags stale links,
 re-checks them, and **notifies the user when the gap is significant**.
+
+**Symbol-path grammar (the linkage identity key).** `symbol-path` is the identity that both
+the build cache and drift detection compare, so it must be derived deterministically — two
+agents must produce the same path for the same construct. Canonical rules:
+
+- **Separator** `.` joins nesting; the path is rooted at the file's top-level scope.
+- **Members** of a type/namespace: `Type.Member` (e.g. `LruCache.Evict`); nested types
+  nest: `Outer.Inner.M`.
+- **Free / module-level functions**: `Module.func`, where `Module` is the module name (or
+  the file stem in languages without modules).
+- **Module-level statements** (e.g. a top-level driver loop) anchor to a synthetic member
+  `Module.__main__` (ordinal-suffixed if several: `__main__#2`).
+- **Overloads** disambiguate by arity then parameter-type signature: `Type.Get/1`,
+  `Type.Get(K)`.
+- **Lambdas/closures** anchor to the enclosing named symbol with an ordinal:
+  `Type.M.$lambda#1`.
+- **One-to-many / many-to-one**: a pseudo element may link to a *set* of symbol-paths (e.g.
+  the §7.1 row implying `MoveToFront`, `InsertAtFront`, `Evict`, `map.Find`); the IR stores
+  the set explicitly. A pseudo element with no symbol counterpart yet is `NEW` (§4/§5).
+
+Worked symbol-path tables accompany the §7.1 and §7.2 examples.
+
+**Rename / dangling-symbol drift.** Symbol-path survives reformatting and edits *elsewhere*
+but **not a rename of the symbol itself** — the path *is* the identity, so rename changes
+it. When read-only git finds no symbol at a stored path, the compiler does **not** guess: it
+similarity-matches (signature + body) within the linked file, **proposes the rename as a
+re-link for the user to confirm**, and meanwhile marks the element `RELINK_PENDING` (a BLOCK
+for compile). An unconfirmed re-link is never applied silently — this prevents both
+split-brain duplicates and clobbering a hand-edited body. (A body that was *also* edited is
+the same axis-2 "costly/irreversible" event the border exists to catch.)
 
 **Incremental compile against a directory.** `/vbc-validate` and `/vbc-compile` accept a
 single `.vibe` file *or* a directory (e.g. `vbc/`). For a directory, the compiler walks the
@@ -165,8 +256,21 @@ can reference each other, v1 is conservative: it reprocesses a changed file **an
 dependents**, falling back to the whole `vbc/` unit when the dependency graph is unclear.
 Precise dependency-graph tracking is a later refinement.
 
+This is purely a *computation* optimization: it decides **what is re-derived**, never
+**whether output is written**. Application is **atomic** (§4 phase 3) — the content hash is
+a skip-work cache, and correctness never depends on it. A directory compile therefore either
+writes the whole BLOCK-free result or, on any BLOCK, leaves the previous successful state
+untouched.
+
 "Monitoring" pseudo changes is therefore **on-demand at command time**, not a background
 watcher — which fits a slash-command tool that runs inside an agent session.
+
+**Git preconditions.** The atomic "previous state" guarantee and the validated-at anchor
+both require a usable git baseline. Compile **refuses** when the repo has no initial commit
+(nothing to anchor linkage or roll back to) and **warns** on a detached HEAD; it will not
+fold its writes into a pre-existing dirty working tree without isolating them. Untracked
+`vbc/` content is still hashed from the working tree (pseudo need not be committed), but
+generated code is written against a committed baseline.
 
 ## 7. Worked examples (canonical — ship in the skill)
 
@@ -217,6 +321,13 @@ partial struct LruCache<K, V>
 | `_evictLock` present, `Get` unsynchronized | **BLOCK** → OK if a "single-threaded" premise is declared | axis 2 — concurrency contract |
 | `_dirty` flush timing unstated | **ASSUME + surface** | defensible default, cheap to change, surfaced |
 
+**Symbol-paths (§6 grammar).** Project linkage targets: the type `LruCache` (with field
+members `LruCache.map`, `LruCache.head`, …), `LruCache.CAPACITY`, `LruCache.Get`,
+`LruCache.Put`, `LruCache.Evict`, `LruCache.MoveToFront`, `LruCache.InsertAtFront`,
+`LruCache.MarkDirty`. The one-to-many "OK" row links a single pseudo line to the **set**
+{`LruCache.MoveToFront`, `LruCache.InsertAtFront`, `LruCache.Evict`}. Library calls
+(`map.Find`, `lock`) are **not** linkage targets.
+
 ### 7.2 Compile context — pipeline/dataflow flavor (trending terms)
 
 ```python
@@ -248,6 +359,12 @@ for window in tumbling_windows(events, every="1min"):
 | `threshold`, `k` | **BLOCK** → ASSUME via policy/premise | unset critical config |
 | per-window loop | **ASSUME** → BLOCK if stream declared huge | axis 3 — perf/scale |
 
+**Symbol-paths (§6 grammar).** Module = file stem `trending`. Linkage targets:
+`trending.find_trending`, `trending.normalize`, `trending.surprise`,
+`trending.load_baseline_rates`, and the module-level driver loop
+`for window in tumbling_windows(...)` → `trending.__main__`. Well-known library calls
+(`top_k`, `tumbling_windows`, `window_of`) are **not** linkage targets.
+
 ### 7.3 Validate context — pseudo contradicts existing code
 
 The keystone phase. Validate is read-only and asks "does this pseudo faithfully describe
@@ -267,6 +384,15 @@ what the code *currently is*?" — not "what should it become."
 
 Validate cannot tell a mistaken description from an intended change, so it hard-halts and
 makes the user choose. This is what makes later edits meaningful.
+
+**`NEW` vs `DIVERGED`.** This BLOCK fires only when a symbol *exists* and the pseudo
+contradicts it (`DIVERGED`). A symbol absent from the whole codebase is `NEW` — validate
+records it for creation rather than blocking, so greenfield pseudo validates cleanly (§4).
+
+**Acknowledging an intended change.** When the divergence is in fact the change the user
+wants (case b), they acknowledge it, flipping the element to `CHANGE_ACK`; the next compile
+applies the new behavior and re-links at the new commit. This is the mechanism that resolves
+the otherwise-permanent re-trigger of the same divergence BLOCK (§4, *Resolving a BLOCK*).
 
 ## 8. Cross-platform packaging
 
@@ -300,6 +426,8 @@ discipline), then **compile** (surgical patching), then **ingest** (the optional
 - Character-span linkage (symbol-level only).
 - Projects not under git.
 - Automatic code → pseudo back-sync (code edits silently updating pseudo).
+- Cross-file symbol moves / large refactors beyond single-file rename re-link (§6).
+- Precise cross-`.vibe` dependency-graph tracking (conservative reprocessing in v1 — §6).
 
 ## 11. Decisions settled with defaults (changeable)
 
@@ -309,7 +437,10 @@ discipline), then **compile** (surgical patching), then **ingest** (the optional
 
 ## 12. Open questions for the implementation plan
 
-- Exact structured-Markdown schema for IR entries.
-- `.vbc/project.md` template (sections, policy syntax).
-- Border report format (how ASSUMEs and BLOCKs are presented for review/resolution).
-- How "significant gap" is thresholded for drift notification.
+- Exact structured-Markdown **formatting** of IR entries (the identity key `symbol-path`
+  and the field/status set are now specified in §5/§6; this is layout only).
+- `.vbc/project.md` template: section layout and the **premise/policy scope syntax**
+  required by §2.
+- Border report format (how ASSUMEs, BLOCKs, and premise-promotion notes are presented).
+- The **similarity / "significant gap" threshold** shared by drift notification and rename
+  re-link (§6).
