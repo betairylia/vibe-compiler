@@ -1,7 +1,7 @@
 # Vibe Compiler (vbc) — Design
 
 **Date:** 2026-06-06
-**Status:** Approved design, revised after adversarial review (2026-06-06); pending implementation plan
+**Status:** Implemented v1 — skill at `skills/vibe-compiler/`, commands at `commands/`. Revised after adversarial review (2026-06-06); plan at `../plans/2026-06-06-vibe-compiler.md`.
 
 > Revision note: §2–§7 updated per the adversarial review in
 > `../reviews/2026-06-06-adversarial-spec-review.md` — atomic/transactional compile,
@@ -455,10 +455,11 @@ discipline), then **compile** (surgical patching), then **ingest** (the optional
 
 ## 12. Open questions for the implementation plan
 
-- Exact structured-Markdown **formatting** of IR entries (the identity key `symbol-path`
-  and the field/status set are now specified in §5/§6; this is layout only).
-- `.vbc/project.md` template: section layout and the **premise/policy scope syntax**
-  required by §2.
-- Border report format (how ASSUMEs, BLOCKs, and premise-promotion notes are presented).
-- The **similarity / "significant gap" threshold** shared by drift notification and rename
-  re-link (§6).
+All four are now **resolved in the v1 skill references**:
+
+- IR entry Markdown formatting → `skills/vibe-compiler/references/ir-format.md` (on-disk schema).
+- `.vbc/project.md` template + premise/policy **scope syntax** →
+  `skills/vibe-compiler/references/project-md.md`.
+- Border report format → `skills/vibe-compiler/references/report-format.md`.
+- Similarity / "significant gap" threshold (≥ 0.6 match to propose a re-link; else BLOCK) →
+  `skills/vibe-compiler/references/ir-format.md`.
