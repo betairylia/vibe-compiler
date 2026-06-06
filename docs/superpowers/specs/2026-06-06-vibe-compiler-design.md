@@ -131,22 +131,32 @@ The same OK/ASSUME/BLOCK labeling is used in two distinct operations:
    - symbol **exists but the pseudo contradicts it** → `DIVERGED`, a **BLOCK** (the §7.3
      case).
 
-   Validate **hard-halts on any BLOCK** (a `DIVERGED` element, or a generation-axis BLOCK),
-   establishing a verified correspondence between abstraction and reality before any change.
+   Validate records **every** reached element's status in a single, complete IR write (it
+   never leaves a half-written IR), then **hard-halts if any BLOCK exists** (a `DIVERGED`
+   element, or a generation-axis BLOCK). The IR — including the `DIVERGED` entries — is still
+   written, so the report and later acknowledgment work; "hard-halt" means *no green light
+   for compile*, not *discard the IR*. If no `project.md` declares the target language **and**
+   there is no existing code to determine it (pure greenfield), the language is undetermined
+   → hard **BLOCK** (axis 2, irreversible) — the one thing the compiler refuses to guess.
+   Validate establishes a verified correspondence between abstraction and reality before any
+   change.
 
 3. **Compile** (`/vbc-compile <file.vibe | dir>`). Lowers the IR into the target language:
    **generates** net-new code for `NEW` elements (at paths derived from the `project.md`
    layout; any invented path/namespace choice is recorded as ASSUME) and applies
    **surgical, symbol-level patches** for `LINKED` / `CHANGE_ACK` elements, leaving code not
-   covered by pseudo untouched.
+   covered by pseudo untouched. On a successful write, a generated `NEW` element becomes
+   `LINKED` (validated-at = the new commit) so a later compile patches it rather than
+   regenerating it; a `CHANGE_ACK` element likewise returns to `LINKED`.
 
    **Precondition (checkable).** For every element it would touch, compile requires an IR
    entry whose status is `NEW`, `LINKED`, or `CHANGE_ACK`, and — for `LINKED` — whose
-   validated-at commit is an ancestor of HEAD with no unresolved drift (§6). If any required
-   entry is missing, `UNVALIDATED`, `DIVERGED`, `RELINK_PENDING`, or stale, compile **stops
-   and tells the user to validate first**. This turns "I ran compile before validate" and "a
-   validate that hard-halted left a partial IR" into deterministic refusals, not silent
-   mis-patches.
+   validated-at commit is an ancestor of HEAD with the source `.vibe` content hash unchanged
+   and no unresolved drift (§6). If an element has **no IR entry** (never validated), or its
+   entry is `DIVERGED` / `RELINK_PENDING`, or its `.vibe` changed since validation, compile
+   **stops and tells the user to validate first**. This turns "I ran compile before validate"
+   and "a validate that hard-halted left `DIVERGED` entries" into deterministic refusals, not
+   silent mis-patches.
 
    **Atomic application (transaction).** Compile **stages** all generated/patched code and
    computes the whole result *before writing anything*. It writes to disk **only if the
@@ -191,8 +201,10 @@ Then the user re-runs the command.
     `LruCache.Evict`), where `symbol-path` is the canonical identity key defined in §6;
   - **status**: one of `NEW` (to-be-created), `LINKED` (validated against existing code),
     `DIVERGED` (validate BLOCK — pseudo contradicts code), `CHANGE_ACK` (user-acknowledged
-    intended change; compile may apply), `RELINK_PENDING` (linked symbol gone after a
-    rename/delete, awaiting confirmation), or `UNVALIDATED`;
+    intended change; compile may apply), or `RELINK_PENDING` (linked symbol gone after a
+    rename/delete, awaiting confirmation). An element that was never validated has **no IR
+    entry** at all (there is no separate "unvalidated" status); a `.vibe` edited since
+    validation is detected by content-hash mismatch (§6), not by a status;
   - **border labels** (OK/ASSUME/BLOCK) with assumption notes and, where applicable, the
     premise/policy/ratified assumption that resolved a call;
   - the **git commit** the linkage was validated against, and the **content hash** of the
@@ -229,8 +241,9 @@ agents must produce the same path for the same construct. Canonical rules:
   the file stem in languages without modules).
 - **Module-level statements** (e.g. a top-level driver loop) anchor to a synthetic member
   `Module.__main__` (ordinal-suffixed if several: `__main__#2`).
-- **Overloads** disambiguate by arity then parameter-type signature: `Type.Get/1`,
-  `Type.Get(K)`.
+- **Overloads** disambiguate by the **full parameter-type signature**, always:
+  `Type.Get(K)`, `Type.Get(K,V)` (arity is implied; never use an arity-only form). This is
+  the single canonical form — no fallback chain.
 - **Lambdas/closures** anchor to the enclosing named symbol with an ordinal:
   `Type.M.$lambda#1`.
 - **One-to-many / many-to-one**: a pseudo element may link to a *set* of symbol-paths (e.g.
@@ -244,9 +257,13 @@ but **not a rename of the symbol itself** — the path *is* the identity, so ren
 it. When read-only git finds no symbol at a stored path, the compiler does **not** guess: it
 similarity-matches (signature + body) within the linked file, **proposes the rename as a
 re-link for the user to confirm**, and meanwhile marks the element `RELINK_PENDING` (a BLOCK
-for compile). An unconfirmed re-link is never applied silently — this prevents both
-split-brain duplicates and clobbering a hand-edited body. (A body that was *also* edited is
-the same axis-2 "costly/irreversible" event the border exists to catch.)
+for compile). An unconfirmed re-link is never applied silently, preventing split-brain
+duplicates. **Identity is resolved before behavior:** while a stored path dangles the element
+is `RELINK_PENDING` and the user first confirms (or rejects) the re-link; only *after* a
+confirmed re-link does the compiler compare the re-linked symbol's body to the pseudo. If the
+re-linked body then diverges — e.g. it was also hand-edited — that surfaces as the normal
+`DIVERGED` case (§7.3), resolved by fixing the pseudo or acknowledging the change. A re-link
+by itself never overwrites a hand-edited body.
 
 **Incremental compile against a directory.** `/vbc-validate` and `/vbc-compile` accept a
 single `.vibe` file *or* a directory (e.g. `vbc/`). For a directory, the compiler walks the
@@ -325,8 +342,9 @@ partial struct LruCache<K, V>
 members `LruCache.map`, `LruCache.head`, …), `LruCache.CAPACITY`, `LruCache.Get`,
 `LruCache.Put`, `LruCache.Evict`, `LruCache.MoveToFront`, `LruCache.InsertAtFront`,
 `LruCache.MarkDirty`. The one-to-many "OK" row links a single pseudo line to the **set**
-{`LruCache.MoveToFront`, `LruCache.InsertAtFront`, `LruCache.Evict`}. Library calls
-(`map.Find`, `lock`) are **not** linkage targets.
+{`LruCache.MoveToFront`, `LruCache.InsertAtFront`, `LruCache.Evict`}. Fields **declared in
+the pseudo** (`LruCache.map`, `LruCache.head`, …) are linkage targets; **library calls** on
+them (`map.Find`, `lock`) are not.
 
 ### 7.2 Compile context — pipeline/dataflow flavor (trending terms)
 
