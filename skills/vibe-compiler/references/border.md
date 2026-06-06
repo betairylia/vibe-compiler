@@ -16,6 +16,11 @@ Mark **BLOCK** if ANY axis holds:
 3. **Viability-threatening** — a perf/memory/complexity/concurrency guess that, if wrong for
    the *actual* scale, makes the result unusable, and context can't tell you the scale.
 
+> The axes overlap — a construct may satisfy several at once (e.g. an unhandled error path is
+> both a *divergent alternative* and an *error-semantics* contract). You need only **one** to
+> hold. The BLOCK **decision** is what matters, not which axis number you cite; when several
+> apply, name the most decisive.
+
 Else mark **ASSUME** if a defensible default exists, the alternatives are behaviorally close
 **OR** cheap to change later, **AND** you surface it to the user.
 
