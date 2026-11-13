@@ -62,4 +62,4 @@ Then `/spec-impl` and wait for LLMs to compile the pseudo code into actual proje
 
 This is no silver bullet. LLM drifts from your intent in an inevitable way, and that's not something you'd expect from a real compiler. Use at your own risk.
 
-But owning your "code" again really feels good and freshing.
+But owning your "code" again really feels good and refreshing.
