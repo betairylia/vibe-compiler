@@ -1,6 +1,6 @@
 # Vibe Compiler
 
-Vibe and own your code.
+Vibe and own your mind.
 
 ## Workflow: When you have an existing codebase
 
