@@ -44,7 +44,7 @@ strict SavedStamina { float current; }
 StaminaSystem : time O(players) // every tick
 {
     if (player is running && !exhausted) current -= 15 * dt;
-    else                                  current += 10 * dt;
+    else                                 current += 10 * dt;
     clamp current to 0..max;
     update exhausted;
 }
