@@ -9,7 +9,7 @@ Let's say you want to modify part of some program. Maybe you wrote it, others wr
 You do this:
 
 1. Make a folder `Specs/` beside the project codebase repo.
-2. Read the codebase of your interest. Write your mindmap of that part in pseudo code under `Specs/<part-name>.vibe`.
+2. Read the codebase of your interest. Write your mindmap of that part in pseudo code under `Specs/<part-name>.vibe`. Write at your own granularity: write in detail for interesting parts, write a blackbox in something you don't want to bother for now.
 3. `/spec-align`. Once it passes, your `.vibe` is then linked with the actual codebase, and you know you have understood the code in your preferred granularity.
 4. Modify your `.vibe`. Add parts or constraints you'd like to have.
 5. `/spec-impl`. Think of a compiler -- LLM will compile your `.vibe` into actual project code.
